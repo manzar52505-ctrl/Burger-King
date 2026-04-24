@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.userId == request.auth.uid 
+        && data.email is string 
+        && data.email.size() <= 200;
+    }
+
+    function isValidOrder(data) {
+      return data.userId == request.auth.uid
+        && data.items is list
+        && data.total is number
+        && data.status in ['pending', 'preparing', 'ready', 'delivered', 'cancelled'];
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    match /orders/{orderId} {
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidOrder(request.resource.data);
+      allow update: if isSignedIn() && isOwner(resource.data.userId) 
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status == 'cancelled';
+    }
+  }
+}

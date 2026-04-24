@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email"]
+    },
+    "Order": {
+      "title": "Customer Order",
+      "description": "Details of a burger order",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string" },
+        "userId": { "type": "string" },
+        "items": { "type": "array" },
+        "total": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "preparing", "ready", "delivered", "cancelled"] },
+        "orderType": { "type": "string", "enum": ["delivery", "pickup"] },
+        "address": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "userId", "items", "total", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer orders"
+    }
+  }
+}

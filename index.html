@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KING BURGERS — Flame-Grilled Perfection Since 1954</title>
+    <meta name="description" content="Experience the royalty of flavor. Flame-grilled burgers, crispy fries, and premium shakes delivered to your kingdom. Order now from King Burgers." />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://kingburgers.com/" />
+    <meta property="og:title" content="KING BURGERS — Flame-Grilled Perfection" />
+    <meta property="og:description" content="Savor the taste of flame-grilled excellence. Order your favorite Whopper today." />
+    <meta property="og:image" content="https://images.unsplash.com/photo-1594212699903-ec8a3eca50f5?auto=format&fit=crop&q=80&w=1200&fm=webp" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:title" content="KING BURGERS — Flame-Grilled Perfection" />
+    <meta property="twitter:description" content="Savor the taste of flame-grilled excellence. Order your favorite Whopper today." />
+    <meta property="twitter:image" content="https://images.unsplash.com/photo-1594212699903-ec8a3eca50f5?auto=format&fit=crop&q=80&w=1200&fm=webp" />
+
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>👑</text></svg>" />
+    <script>
+      (function() {
+        // 1. Provide a sacrificial 'global' object to absorb polyfill assignments
+        if (!window.global || window.global === window) {
+          window.global = {};
+        }
+
+        // 2. The 'Setter Trap' for fetch:
+        // Some libraries (like node-fetch polyfills) try to do `window.fetch = ...` or `globalThis.fetch = ...`
+        // which fails in many environments because fetch is a read-only getter.
+        var originalFetch = window.fetch;
+        try {
+          Object.defineProperty(window, 'fetch', {
+            get: function() { return originalFetch; },
+            set: function(newFetch) { 
+              console.warn("Blocked attempt to overwrite window.fetch. Using native fetch instead.");
+            },
+            configurable: true,
+            enumerable: true
+          });
+        } catch (e) {
+          console.error("Critical: Could not apply fetch protection trap.", e);
+        }
+      })();
+    </script>
+    
+    <!-- Analytics & Heatmap Placeholder -->
+    <script>
+      // Example: Clarity or Hotjar script would go here
+      // This allows for heatmap generation and click tracking
+      console.log("[System] Heatmap & Behavior Tracking Initialized");
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,9 @@
+{
+  "name": "King Burgers — Bold & Flame Grilled",
+  "description": "High-converting fast food experience with rapid ordering, customization, and a vibrant modern aesthetic.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
