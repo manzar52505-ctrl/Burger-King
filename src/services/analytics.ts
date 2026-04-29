@@ -37,38 +37,42 @@ class AnalyticsService {
   public track(event: AnalyticsEvent) {
     const timestamp = new Date().toISOString();
     
-    // Auto-inject variant if available in localStorage to avoid circular dependency
-    const variant = localStorage.getItem('king_burger_ab_variant');
-    const enrichedEvent = { ...event, variant: event.variant || variant || 'N/A', timestamp };
+    // Use requestIdleCallback for non-critical tracking to keep UI smooth
+    const trackFn = () => {
+      // Auto-inject variant if available in localStorage to avoid circular dependency
+      const variant = localStorage.getItem('king_burger_ab_variant');
+      const enrichedEvent = { ...event, variant: event.variant || variant || 'N/A', timestamp };
 
-    if (this.isDevelopment) {
-      console.log(`[Analytics] ${timestamp} - ${enrichedEvent.type}`, enrichedEvent);
-      this.events.push(enrichedEvent);
-      
-      // Log periodic summary every 10 events
-      if (this.events.length % 10 === 0) {
-        console.group('[Analytics Summary]');
-        console.log('Total Events:', this.events.length);
+      if (this.isDevelopment) {
+        console.log(`[Analytics] ${timestamp} - ${enrichedEvent.type}`, enrichedEvent);
+        this.events.push(enrichedEvent);
         
-        // A/B Test stats summary
-        const variantA = this.events.filter(e => e.variant === 'A').length;
-        const variantB = this.events.filter(e => e.variant === 'B').length;
-        const convA = this.events.filter(e => e.variant === 'A' && e.type === 'CONVERSION').length;
-        const convB = this.events.filter(e => e.variant === 'B' && e.type === 'CONVERSION').length;
+        // Log periodic summary every 10 events
+        if (this.events.length % 10 === 0) {
+          console.group('[Analytics Summary]');
+          console.log('Total Events:', this.events.length);
+          
+          // A/B Test stats summary
+          const variantA = this.events.filter(e => e.variant === 'A').length;
+          const variantB = this.events.filter(e => e.variant === 'B').length;
+          const convA = this.events.filter(e => e.variant === 'A' && e.type === 'CONVERSION').length;
+          const convB = this.events.filter(e => e.variant === 'B' && e.type === 'CONVERSION').length;
 
-        console.table({
-          Variant_A: { Events: variantA, Conversions: convA, Rate: variantA ? ((convA/variantA)*100).toFixed(2) + '%' : '0%' },
-          Variant_B: { Events: variantB, Conversions: convB, Rate: variantB ? ((convB/variantB)*100).toFixed(2) + '%' : '0%' }
-        });
-        
-        console.groupEnd();
+          console.table({
+            Variant_A: { Events: variantA, Conversions: convA, Rate: variantA ? ((convA/variantA)*100).toFixed(2) + '%' : '0%' },
+            Variant_B: { Events: variantB, Conversions: convB, Rate: variantB ? ((convB/variantB)*100).toFixed(2) + '%' : '0%' }
+          });
+          
+          console.groupEnd();
+        }
       }
-    }
+    };
 
-    // Example of how to send to an external provider
-    // if (window.gtag) {
-    //   window.gtag('event', event.type, { ...event, timestamp });
-    // }
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => trackFn());
+    } else {
+      setTimeout(trackFn, 1);
+    }
   }
 
   /**

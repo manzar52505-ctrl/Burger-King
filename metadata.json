@@ -1,6 +1,6 @@
 {
-  "name": "King Burgers — Bold & Flame Grilled",
-  "description": "High-converting fast food experience with rapid ordering, customization, and a vibrant modern aesthetic.",
+  "name": "Royal Fast Food",
+  "description": "Premium fast food experience featuring rapid ordering, real-time tracking, and a bold modern interface for the ultimate dining experience.",
   "requestFramePermissions": [
     "camera",
     "microphone",

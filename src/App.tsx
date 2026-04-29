@@ -3,7 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, lazy, Suspense } from 'react';
+
+// Lazy load large components
+const AdminDashboard = lazy(() => import('./components/admin/AdminDashboard.tsx'));
+const AdminLogin = lazy(() => import('./components/admin/AdminLogin.tsx'));
+const CheckoutForm = lazy(() => import('./components/CheckoutForm.tsx'));
+
 import { 
   ShoppingBag, 
   Menu as MenuIcon, 
@@ -35,7 +41,13 @@ import {
   Printer,
   Download,
   FileText,
-  Gift
+  Gift,
+  Loader2,
+  Lock,
+  LogOut,
+  History,
+  ArrowLeft,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence, useScroll, useTransform } from 'motion/react';
 import { toast, Toaster } from 'sonner';
@@ -43,6 +55,11 @@ import { MENU_ITEMS, MenuItem, CartItem, INGREDIENTS, Ingredient, DEALS, Deal, R
 import { translations, Language } from './translations';
 import { analytics } from './services/analytics';
 import { recommendationService } from './services/recommendationService';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements } from '@stripe/react-stripe-js';
+import MenuItemCard from './components/MenuItemCard.tsx';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 import { 
   auth, 
   db, 
@@ -59,8 +76,13 @@ import {
   collection,
   query,
   where,
-  getDocs
+  getDocs,
+  handleFirestoreError,
+  OperationType
 } from './firebase';
+
+const stripeKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY;
+const stripePromise = stripeKey ? loadStripe(stripeKey) : null;
 
 type FunnelStep = 'home' | 'menu' | 'deals' | 'locations' | 'rewards' | 'checkout' | 'confirmation' | 'account';
 
@@ -85,6 +107,7 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [menuItems, setMenuItems] = useState<MenuItem[]>(MENU_ITEMS);
   const [deals, setDeals] = useState<Deal[]>(DEALS);
+  const [categories, setCategories] = useState<string[]>(['burgers', 'sides', 'drinks', 'desserts', 'deals']);
 
   const [dealTimers, setDealTimers] = useState<Record<string, number>>(
     Object.fromEntries(deals.map(d => [d.id, d.expiresInSeconds]))
@@ -97,15 +120,43 @@ export default function App() {
   });
 
   useEffect(() => {
-    fetch('/api/menu')
-      .then(res => res.json())
-      .then(data => setMenuItems(data))
-      .catch(err => console.error('Failed to fetch menu:', err));
+    const fetchInitialData = async () => {
+      // Small delay on initial attempt to ensure server is ready
+      if (isAppLoading) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
 
-    fetch('/api/deals')
-      .then(res => res.json())
-      .then(data => setDeals(data))
-      .catch(err => console.error('Failed to fetch deals:', err));
+      const ts = Date.now();
+      try {
+        const [menuRes, catRes, dealRes] = await Promise.all([
+          fetch(`/api/menu?t=${ts}`),
+          fetch(`/api/menu/categories?t=${ts}`),
+          fetch(`/api/deals?t=${ts}`)
+        ]);
+
+        if (menuRes.ok) {
+          const data = await menuRes.json();
+          if (data && Array.isArray(data)) setMenuItems(data);
+        }
+        if (catRes.ok) {
+          const data = await catRes.json();
+          if (data && Array.isArray(data)) setCategories(data);
+        }
+        if (dealRes.ok) {
+          const data = await dealRes.json();
+          if (data && Array.isArray(data)) setDeals(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch royal data:', err);
+        // Silently retry on next interval
+      }
+    };
+
+    fetchInitialData();
+
+    // Poll for menu updates every 30 seconds
+    const interval = setInterval(fetchInitialData, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   const { scrollY } = useScroll();
@@ -136,11 +187,59 @@ export default function App() {
   }, [orderHistory, cart, menuItems]);
   const [isLocating, setIsLocating] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<Restaurant | null>(RESTAURANTS[0]);
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<FirebaseUser | any>(null);
   const [userData, setUserData] = useState<any>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authForm, setAuthForm] = useState({ email: '', password: '', displayName: '' });
   const [isAppLoading, setIsAppLoading] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [isAdminMode, setIsAdminMode] = useState(false);
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Check if current user is an admin
+  useEffect(() => {
+    if (user) {
+      const adminRef = doc(db, 'admins', user.uid);
+      getDocs(query(collection(db, 'admins'), where('__name__', '==', user.uid)))
+        .then(snap => {
+          if (!snap.empty || user.email === 'manzar52505@gmail.com') {
+            setIsAdmin(true);
+          } else {
+            setIsAdmin(false);
+          }
+        })
+        .catch(() => setIsAdmin(false));
+    } else {
+      setIsAdmin(false);
+    }
+  }, [user]);
   const [isOrderProcessing, setIsOrderProcessing] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [paymentInitError, setPaymentInitError] = useState<string | null>(null);
+
+  const initPayment = async (amount: number) => {
+    setPaymentInitError(null);
+    setClientSecret(null);
+    try {
+      const response = await fetch('/api/payment/create-payment-intent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setClientSecret(data.clientSecret);
+      } else {
+        throw new Error(data.message);
+      }
+    } catch (error: any) {
+      setPaymentInitError(error.message);
+      toast.error("Failed to initialize payment", { description: error.message });
+    }
+  };
   const [showReceipt, setShowReceipt] = useState(false);
   
   // Form States
@@ -187,41 +286,23 @@ export default function App() {
   }, [step, trackingTime]);
 
   useEffect(() => {
-    // Welcome Popup - 5 seconds after loading
+    // Welcome Popup - Much later, only for guests
     if (!isAppLoading && !hasShownWelcome && !user) {
       const timer = setTimeout(() => {
         setActivePopup('welcome');
         setHasShownWelcome(true);
-      }, 5000);
+      }, 30000); // 30 seconds delay
       return () => clearTimeout(timer);
     }
   }, [isAppLoading, hasShownWelcome, user]);
 
   useEffect(() => {
-    // Exit Intent Popup
-    const handleMouseOut = (e: MouseEvent) => {
-      if (e.clientY <= 0 && !activePopup && cart.length > 0) {
-        setActivePopup('exit');
-      }
-    };
-    document.addEventListener('mouseleave', handleMouseOut);
-    return () => document.removeEventListener('mouseleave', handleMouseOut);
-  }, [activePopup, cart.length]);
-
-  useEffect(() => {
-    // Deals Popup - after scrolling or being on home for a bit
-    if (step === 'home' && !hasShownDeals && !activePopup) {
-      const timer = setTimeout(() => {
-        setActivePopup('deals');
-        setHasShownDeals(true);
-      }, 15000);
-      return () => clearTimeout(timer);
-    }
-  }, [step, hasShownDeals, activePopup]);
+    // Exit Intent and Deals popups removed as they were intrusive
+  }, []);
 
   useEffect(() => {
     // Simulated Initial Loading
-    const timer = setTimeout(() => setIsAppLoading(false), 2000);
+    const timer = setTimeout(() => setIsAppLoading(false), 1500);
     return () => clearTimeout(timer);
   }, []);
 
@@ -229,7 +310,7 @@ export default function App() {
     if (step === 'confirmation') {
       const interval = setInterval(() => {
         setTrackingStatus(prev => prev < 3 ? prev + 1 : prev);
-      }, 5000);
+      }, 10000); // Slower updates (10 seconds)
       return () => clearInterval(interval);
     } else {
       setTrackingStatus(0);
@@ -239,16 +320,17 @@ export default function App() {
   useEffect(() => {
     if (step === 'confirmation') {
       const messages = [
-        "Order Placed! We're on it.",
-        "The King is Cookin'! Your order is being prepared.",
-        "Dispatched! Your meal is on the way.",
-        "Delivered! Enjoy your banquet, King!"
+        "Order Placed!",
+        "Preparing your feast...",
+        "On the way!",
+        "Delivered! Enjoy, King!"
       ];
       
-      if (trackingStatus >= 0 && trackingStatus < messages.length) {
+      // Only show toast for the final state or specific milestones to reduce noise
+      if (trackingStatus === 0 || trackingStatus === 3) {
         toast.info(messages[trackingStatus], {
           icon: trackingStatus === 3 ? '👑' : undefined,
-          description: `Order #${lastOrderNumber || 'BK-5432'}`
+          description: `Order #${lastOrderNumber || 'BK-6117'}`
         });
       }
     }
@@ -261,12 +343,36 @@ export default function App() {
   // Test Firebase Connection & Initialize Auth
   useEffect(() => {
     testConnection();
+    
+    // Check for traditional session first
+    const token = localStorage.getItem('king_burger_token');
+    if (token) {
+      // Decode user from token or fetch profile
+      // For this demo, we'll try to sync with the sync endpoint but we need a saved user object
+      const savedUser = localStorage.getItem('king_burger_user');
+      if (savedUser) {
+        const parsedUser = JSON.parse(savedUser);
+        setUser(parsedUser);
+        setUserData(parsedUser);
+        
+        // Fetch history from API
+        fetch(`/api/orders/history/${parsedUser.id}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setOrderHistory(data);
+        })
+        .catch(console.error);
+      }
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
         // Sync user data
         const userRef = doc(db, 'users', firebaseUser.uid);
-        onSnapshot(userRef, (snap) => {
+        const unsubscribeSnapshot = onSnapshot(userRef, (snap) => {
           if (snap.exists()) {
             const data = snap.data();
             setUserData(data);
@@ -276,7 +382,7 @@ export default function App() {
           } else {
             // New user init
             const newUser = {
-              uid: firebaseUser.uid,
+              userId: firebaseUser.uid, // Fix: mapping uid to userId for Firestore rules
               email: firebaseUser.email,
               displayName: firebaseUser.displayName,
               photoURL: firebaseUser.photoURL,
@@ -285,15 +391,25 @@ export default function App() {
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp()
             };
-            setDoc(userRef, newUser);
+            setDoc(userRef, newUser).catch(err => {
+              handleFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
+            });
           }
+        }, (error) => {
+          handleFirestoreError(error, OperationType.GET, `users/${firebaseUser.uid}`);
         });
 
         // Load order history
         const ordersQuery = query(collection(db, 'orders'), where('userId', '==', firebaseUser.uid));
         getDocs(ordersQuery).then(snap => {
           setOrderHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        }).catch(error => {
+          handleFirestoreError(error, OperationType.LIST, 'orders');
         });
+
+        return () => {
+          unsubscribeSnapshot();
+        };
       } else {
         setUserData(null);
         setOrderHistory([]);
@@ -327,7 +443,59 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => auth.signOut();
+  const handleTraditionalAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isAuthenticating) return;
+    setIsAuthenticating(true);
+    
+    const endpoint = authMode === 'signup' ? '/api/auth/signup' : '/api/auth/login';
+    const authToast = toast.loading(authMode === 'signup' ? "Creating your account..." : "Entering the Kingdom...");
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(authForm)
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Authentication failed');
+      }
+
+      localStorage.setItem('king_burger_token', data.token);
+      localStorage.setItem('king_burger_user', JSON.stringify(data.user));
+      setUser(data.user);
+      setUserData(data.user);
+      toast.success(authMode === 'signup' ? "Account created! Welcome, King!" : "Welcome back, King!", { id: authToast });
+      setStep('home');
+    } catch (error: any) {
+      toast.error(error.message || "Something went wrong", { id: authToast });
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('king_burger_token');
+    localStorage.removeItem('king_burger_user');
+    auth.signOut();
+    setUser(null);
+    setUserData(null);
+    setIsAdminLoggedIn(false);
+    setIsAdminMode(false);
+    setStep('home');
+    toast.success('Logged out successfully');
+  };
+
+  const handleAdminLogin = (token: string, userData: any) => {
+    localStorage.setItem('king_burger_token', token);
+    localStorage.setItem('king_burger_user', JSON.stringify(userData));
+    setUser(userData);
+    setUserData(userData);
+    setIsAdminLoggedIn(true);
+  };
 
   const handlePlaceOrder = async () => {
     if (isOrderProcessing) return;
@@ -351,27 +519,32 @@ export default function App() {
     analytics.trackConversion(orderId, total);
     
     try {
-      if (user) {
-        // Create Order
-        const orderRef = doc(db, 'orders', orderId);
-        await setDoc(orderRef, {
-          userId: user.uid,
-          orderNumber: orderId,
+      const response = await fetch('/api/orders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('king_burger_token')}`
+        },
+        body: JSON.stringify({
+          userId: user?.id || user?.uid, // Handle both traditional and firebase users if needed
           items: cart,
           total: total,
-          status: 'pending',
-          deliveryDetails: checkoutData,
-          createdAt: serverTimestamp()
-        });
+          orderNumber: orderId,
+          deliveryDetails: checkoutData
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to secure your banquet");
+      }
 
-        // Update User
-        const userRef = doc(db, 'users', user.uid);
+      // Update local state if necessary
+      if (user) {
+        // Refresh local user data or points
         const earnedPoints = Math.floor(subtotal * 10);
-        await updateDoc(userRef, {
-          points: (userData?.points || 0) + earnedPoints,
-          totalOrders: (userData?.totalOrders || 0) + 1,
-          updatedAt: serverTimestamp()
-        });
+        setUserData(prev => prev ? { ...prev, points: (prev.points || 0) + earnedPoints } : null);
       }
       
       // Simulate payment processing delay for professionalism
@@ -379,11 +552,12 @@ export default function App() {
       
       toast.success("Banquet Secured!", { id: orderToast });
       setStep('confirmation');
+      setCart([]); // Clear cart after success
     } catch (error: any) {
       console.error("Error placing order:", error);
       toast.error("The Kitchen is Overwhelmed", {
         id: orderToast,
-        description: "Something went wrong. Your card was not charged."
+        description: error.message || "Something went wrong. Your card was not charged."
       });
     } finally {
       setIsOrderProcessing(false);
@@ -442,6 +616,71 @@ export default function App() {
     }
   };
 
+  const handleDownloadReceipt = async () => {
+    try {
+      const receiptElement = document.getElementById('digital-receipt');
+      if (!receiptElement) {
+        toast.error("Receipt element not found");
+        return;
+      }
+
+      const downloadToast = toast.loading("Forging your royal document...");
+      
+      const canvas = await html2canvas(receiptElement, {
+        scale: 3, // Higher resolution for crisp text
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false,
+        width: receiptElement.scrollWidth,
+        height: receiptElement.scrollHeight,
+        onclone: (clonedDoc) => {
+          const el = clonedDoc.getElementById('digital-receipt');
+          if (el) {
+            // Remove scroll constraints for the capture
+            el.style.maxHeight = 'none';
+            el.style.height = 'auto';
+            el.style.overflow = 'visible';
+            el.style.width = '500px'; // Force a standard width for the receipt look
+            el.style.padding = '48px';
+            
+            // Safe fallback for any remaining oklch colors
+            const allElements = el.getElementsByTagName("*");
+            for (let i = 0; i < allElements.length; i++) {
+              const node = allElements[i] as HTMLElement;
+              const style = window.getComputedStyle(node);
+              if (style.color.includes('oklch')) node.style.color = '#050505';
+              if (style.backgroundColor.includes('oklch')) node.style.backgroundColor = 'transparent';
+              if (style.borderColor.includes('oklch')) node.style.borderColor = '#e5e7eb';
+            }
+          }
+        }
+      });
+
+      const imgData = canvas.toDataURL('image/png', 1.0);
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      
+      const imgWidth = 140; // Keeps it looking like a receipt in the center of A4
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      const xOffset = (pageWidth - imgWidth) / 2;
+      const yOffset = 20;
+
+      pdf.addImage(imgData, 'PNG', xOffset, yOffset, imgWidth, imgHeight);
+      pdf.save(`KingBurger_Receipt_${lastOrderNumber || 'BK-6117'}.pdf`);
+      
+      toast.success("Receipt downloaded!", { id: downloadToast, description: "Your banquet record is saved." });
+    } catch (error) {
+      console.error("PDF generation failed:", error);
+      toast.error("Download failed", { description: "The scribes were unable to finalize your receipt." });
+    }
+  };
+
   useEffect(() => {
     const timer = setInterval(() => {
       setTimeLeft(prev => {
@@ -460,8 +699,6 @@ export default function App() {
     }, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  const categories = ['burgers', 'sides', 'drinks', 'desserts', 'deals'];
 
   const filteredItems = useMemo(() => {
     return menuItems.filter(item => {
@@ -499,12 +736,15 @@ export default function App() {
 
   // Persist cart to Firestore
   useEffect(() => {
-    if (user && cart.length > 0) {
-      const userRef = doc(db, 'users', user.uid);
+    if (user && cart.length > 0 && auth.currentUser) {
+      const currentUid = auth.currentUser.uid;
+      const userRef = doc(db, 'users', currentUid);
       updateDoc(userRef, {
         cart: cart,
         updatedAt: serverTimestamp()
-      }).catch(err => console.error("Error saving cart:", err));
+      }).catch(err => {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${currentUid}`);
+      });
     }
   }, [cart, user]);
 
@@ -569,6 +809,38 @@ export default function App() {
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [step, checkoutSubStep]);
+
+  if (isAdminMode) {
+    if (!isAdminLoggedIn) {
+      return (
+        <div className="relative">
+        <Suspense fallback={
+          <div className="min-h-screen bg-brand-black flex items-center justify-center">
+            <Loader2 className="w-8 h-8 text-brand-yellow animate-spin" />
+          </div>
+        }>
+          <AdminLogin onLoginSuccess={handleAdminLogin} />
+        </Suspense>
+          <button 
+            onClick={() => setIsAdminMode(false)}
+            className="fixed top-6 left-6 text-white/40 hover:text-white flex items-center gap-2 text-[10px] font-black uppercase tracking-widest z-[150]"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to Restaurant
+          </button>
+        </div>
+      );
+    }
+    return (
+      <Suspense fallback={
+        <div className="min-h-screen bg-brand-black flex items-center justify-center">
+          <Loader2 className="w-8 h-8 text-brand-yellow animate-spin" />
+        </div>
+      }>
+        <AdminDashboard onLogout={handleLogout} />
+      </Suspense>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-brand-black text-white selection:bg-brand-red selection:text-white pb-20 lg:pb-0">
@@ -1148,91 +1420,23 @@ export default function App() {
                     );
                     
                     return (
-                      <motion.div
-                        layout
+                      <MenuItemCard 
                         key={item.id}
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.9 }}
-                        whileHover={{ y: -10 }}
-                        className="modern-card group flex flex-col"
-                      >
-                        <div className="relative aspect-[4/3] overflow-hidden">
-                          <img 
-                            src={item.image} 
-                            alt={item.name}
-                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                            loading="lazy"
-                            referrerPolicy="no-referrer"
-                          />
-                          <div className="absolute inset-0 bg-gradient-to-t from-brand-black/80 to-transparent" />
-                          
-                          <div className="absolute top-4 left-4 flex flex-col gap-2">
-                            {hasOrderedBefore && (
-                              <div className="bg-brand-black/60 backdrop-blur-md text-brand-yellow px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest flex items-center gap-1 border border-brand-yellow/30 shadow-xl">
-                                <Heart className="w-3 h-3 fill-current" /> Fast Choice
-                              </div>
-                            )}
-                            {item.popular && (
-                              <div className="bg-brand-yellow text-brand-black px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest flex items-center gap-1 shadow-lg">
-                                <Star className="w-3 h-3 fill-current" /> Popular
-                              </div>
-                            )}
-                            {item.new && (
-                              <div className="bg-brand-red text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest flex items-center gap-1 shadow-lg">
-                                NEW
-                              </div>
-                            )}
-                          </div>
-
-                        <div className="absolute top-4 right-4 flex gap-2">
-                          {item.isVeg && (
-                            <div className="bg-green-500 p-1.5 rounded-lg shadow-lg">
-                              <ChefHat className="w-4 h-4 text-white" />
-                            </div>
-                          )}
-                          {item.isSpicy && (
-                            <div className="bg-brand-red p-1.5 rounded-lg shadow-lg">
-                              <Flame className="w-4 h-4 text-white" />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="p-6 flex-grow flex flex-col">
-                        <div className="flex items-start justify-between mb-4">
-                          <h3 className="font-display text-2xl tracking-tight leading-none group-hover:text-brand-yellow transition-colors">{getTranslatedItemName(item)}</h3>
-                          <span className="font-display text-2xl text-brand-yellow">${item.price}</span>
-                        </div>
-                        <p className="text-white/40 text-sm font-modern mb-6 line-clamp-2">
-                          {item.description}
-                        </p>
-                        <div className="mt-auto flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-white/30">
-                            <Flame className="w-3 h-3" /> {item.calories} {t('calories') || 'KCAL'}
-                          </div>
-                          <motion.button 
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                            onClick={(e) => {
-                              // Trigger fly animation
-                              const rect = e.currentTarget.getBoundingClientRect();
-                              setFlyingItem({
-                                x: rect.left,
-                                y: rect.top,
-                                image: item.image
-                              });
-                              setSelectedItem(item);
-                            }}
-                            className="bg-brand-red text-white px-4 py-2 rounded-xl font-display text-lg tracking-wide hover:bg-brand-red/90 transition-all flex items-center gap-2"
-                          >
-                            <Plus className="w-4 h-4" /> ADD
-                          </motion.button>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                })}
+                        item={item}
+                        hasOrderedBefore={hasOrderedBefore}
+                        onSelect={(selected, rect) => {
+                          setFlyingItem({
+                            x: rect.left,
+                            y: rect.top,
+                            image: selected.image
+                          });
+                          setSelectedItem(selected);
+                        }}
+                        getTranslatedName={getTranslatedItemName}
+                        t={t}
+                      />
+                    );
+                  })}
               </AnimatePresence>
                 {filteredItems.length === 0 && (
                   <div className="col-span-full py-24 text-center opacity-40">
@@ -1683,9 +1887,100 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="funnel-step py-12"
             >
-              <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-12">
-                <div className="lg:col-span-1 space-y-8">
-                  <div className="bg-brand-dark p-8 rounded-[40px] border border-white/10 text-center">
+              {!user ? (
+                <div className="max-w-md mx-auto bg-brand-dark p-8 sm:p-12 rounded-[40px] border border-white/10 shadow-2xl">
+                  <div className="text-center mb-10">
+                    <div className="w-20 h-20 bg-brand-yellow rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-brand-yellow/20">
+                      <ChefHat className="w-10 h-10 text-brand-black" />
+                    </div>
+                    <h2 className="text-4xl font-display uppercase tracking-tight mb-2">
+                      {authMode === 'login' ? 'Welcome Back' : 'Join the Kingdom'}
+                    </h2>
+                    <p className="text-white/40 text-[10px] font-black uppercase tracking-[0.2em]">
+                      {authMode === 'login' ? 'Enter your credentials to continue' : 'Sign up for royal rewards and faster checkout'}
+                    </p>
+                  </div>
+
+                  <form onSubmit={handleTraditionalAuth} className="space-y-6">
+                    {authMode === 'signup' && (
+                      <div className="space-y-2">
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-brand-yellow ml-4">Display Name</label>
+                        <input 
+                          type="text"
+                          required
+                          value={authForm.displayName}
+                          onChange={e => setAuthForm({ ...authForm, displayName: e.target.value })}
+                          className="w-full bg-white/5 border border-white/10 rounded-3xl px-6 py-4 text-white font-modern focus:outline-none focus:border-brand-yellow transition-all"
+                          placeholder="e.g. King Burger"
+                        />
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-black uppercase tracking-widest text-brand-yellow ml-4">Email Address</label>
+                      <input 
+                        type="email"
+                        required
+                        value={authForm.email}
+                        onChange={e => setAuthForm({ ...authForm, email: e.target.value })}
+                        className="w-full bg-white/5 border border-white/10 rounded-3xl px-6 py-4 text-white font-modern focus:outline-none focus:border-brand-yellow transition-all"
+                        placeholder="your@email.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-black uppercase tracking-widest text-brand-yellow ml-4">Password</label>
+                      <input 
+                        type="password"
+                        required
+                        value={authForm.password}
+                        onChange={e => setAuthForm({ ...authForm, password: e.target.value })}
+                        className="w-full bg-white/5 border border-white/10 rounded-3xl px-6 py-4 text-white font-modern focus:outline-none focus:border-brand-yellow transition-all"
+                        placeholder="••••••••"
+                      />
+                    </div>
+
+                    <button 
+                      type="submit"
+                      disabled={isAuthenticating}
+                      className="w-full bg-brand-yellow text-brand-black py-5 rounded-[2rem] text-xs font-black uppercase tracking-widest hover:bg-white transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                    >
+                      {isAuthenticating ? (
+                        <div className="w-5 h-5 border-2 border-brand-black/30 border-t-brand-black rounded-full animate-spin" />
+                      ) : (
+                        <>
+                          {authMode === 'login' ? 'Login to Kingdom' : 'Create Account'}
+                          <ArrowRight className="w-4 h-4" />
+                        </>
+                      )}
+                    </button>
+                  </form>
+
+                  <div className="mt-8 pt-8 border-t border-white/5 space-y-6">
+                    <button 
+                      onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+                      className="w-full text-center text-white/40 text-[10px] font-black uppercase tracking-widest hover:text-brand-yellow transition-colors"
+                    >
+                      {authMode === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Login"}
+                    </button>
+
+                    <div className="relative">
+                      <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/5"></div></div>
+                      <div className="relative flex justify-center text-[10px] uppercase font-black"><span className="px-4 bg-brand-dark text-white/20 tracking-widest leading-none translate-y-[-2px]">Or continue with</span></div>
+                    </div>
+
+                    <button 
+                      onClick={handleLogin}
+                      disabled={isAuthenticating}
+                      className="w-full bg-white/5 border border-white/10 text-white py-4 rounded-3xl text-[10px] font-black uppercase tracking-widest hover:bg-white/10 transition-all flex items-center justify-center gap-3"
+                    >
+                      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/smartlock/google.svg" className="w-4 h-4" alt="" />
+                      Google Account
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-12">
+                  <div className="lg:col-span-1 space-y-8">
+                    <div className="bg-brand-dark p-8 rounded-[40px] border border-white/10 text-center">
                     <img 
                       src={user?.photoURL || ''} 
                       className="w-24 h-24 rounded-full mx-auto mb-6 border-4 border-brand-yellow p-1" 
@@ -1695,6 +1990,20 @@ export default function App() {
                     />
                     <h2 className="text-3xl font-display uppercase mb-2">{user?.displayName}</h2>
                     <p className="text-white/40 text-xs font-modern mb-8">{user?.email}</p>
+                    
+                    {isAdmin && (
+                      <button 
+                        onClick={() => {
+                          setIsAdminMode(true);
+                          setIsAdminLoggedIn(true);
+                        }}
+                        className="w-full py-4 mb-4 bg-brand-yellow text-brand-black rounded-3xl text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center justify-center gap-2"
+                      >
+                        <Lock className="w-3 h-3" />
+                        Go to Admin Panel
+                      </button>
+                    )}
+
                     <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-8">
                       <div className="text-center">
                         <span className="block text-[10px] font-black text-brand-yellow uppercase tracking-widest mb-1">{t('points') || 'Points'}</span>
@@ -1758,8 +2067,9 @@ export default function App() {
                   )}
                 </div>
               </div>
-            </motion.section>
-          )}
+            )}
+          </motion.section>
+        )}
 
           {step === 'checkout' && (
             <motion.section 
@@ -1856,6 +2166,7 @@ export default function App() {
                           onClick={() => {
                             if (validateCheckout()) {
                               setCheckoutSubStep('payment');
+                              initPayment(subtotal + 2.99);
                             } else {
                               toast.error("Validation Failed", { description: "Please correct the errors before proceeding." });
                             }
@@ -1873,49 +2184,70 @@ export default function App() {
                         exit={{ opacity: 0, x: -20 }}
                         className="space-y-6"
                       >
-                        <h2 className="text-4xl font-display uppercase italic mb-8">Payment Method</h2>
+                        <h2 className="text-4xl font-display uppercase italic mb-8">Payment</h2>
                         
-                        <div className="grid grid-cols-1 gap-4">
-                          <button className="flex items-center justify-between p-6 bg-brand-dark rounded-3xl border border-brand-yellow/50 group transition-all">
-                            <div className="flex items-center gap-4">
-                              <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center overflow-hidden">
-                                <img 
-                                  src="https://upload.wikimedia.org/wikipedia/commons/b/b5/Google_Pay_%28G_Pay%29_Logo.svg" 
-                                  className="w-8" 
-                                  alt="GPay" 
-                                  loading="lazy"
-                                  referrerPolicy="no-referrer"
-                                />
+                        {clientSecret ? (
+                          stripePromise ? (
+                            <Elements stripe={stripePromise} options={{ clientSecret, appearance: { theme: 'night' } }}>
+                            <Suspense fallback={
+                              <div className="py-20 flex flex-col items-center justify-center gap-4">
+                                <Loader2 className="w-8 h-8 text-brand-yellow animate-spin" />
+                                <span className="text-[10px] font-black uppercase tracking-widest text-white/20">Initializing Secure Payment...</span>
                               </div>
-                              <div className="text-left">
-                                <span className="block font-bold">Google Pay</span>
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Instant Checkout</span>
-                              </div>
+                            }>
+                              <CheckoutForm 
+                                amount={subtotal + 2.99} 
+                                onSuccess={handlePlaceOrder} 
+                                isLoading={isOrderProcessing} 
+                              />
+                            </Suspense>
+                            </Elements>
+                          ) : (
+                            <div className="bg-brand-dark p-12 rounded-3xl border border-white/5 text-center">
+                              <p className="text-brand-yellow font-display uppercase mb-4">Payment System Offline</p>
+                              <p className="text-xs text-white/60 mb-6">Stripe configuration is missing or invalid. Payment of ${(subtotal + 2.99).toFixed(2)} is required to place an order.</p>
+                              <button 
+                                onClick={handlePlaceOrder}
+                                className="bg-brand-yellow text-brand-black px-8 py-3 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all w-full flex items-center justify-center gap-2"
+                                disabled={isOrderProcessing}
+                              >
+                                {isOrderProcessing ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <>Skip Payment (Demo Mode)</>
+                                )}
+                              </button>
                             </div>
-                            <div className="w-6 h-6 rounded-full border-2 border-brand-yellow flex items-center justify-center">
-                              <div className="w-3 h-3 bg-brand-yellow rounded-full" />
+                          )
+                        ) : paymentInitError ? (
+                          <div className="bg-brand-dark p-12 rounded-3xl border border-brand-red/30 text-center">
+                            <p className="text-brand-red font-display uppercase mb-4">Payment Error</p>
+                            <p className="text-xs text-white/60 mb-8">{paymentInitError}</p>
+                            <div className="flex flex-col gap-3">
+                              <button 
+                                onClick={() => initPayment(subtotal + 2.99)}
+                                className="bg-white text-brand-black px-8 py-3 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-brand-yellow transition-all flex items-center justify-center gap-2"
+                              >
+                                Try Again
+                              </button>
+                              <button 
+                                onClick={handlePlaceOrder}
+                                className="bg-brand-yellow text-brand-black px-8 py-3 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center justify-center gap-2"
+                                disabled={isOrderProcessing}
+                              >
+                                {isOrderProcessing ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <>Skip & Confirm (Demo)</>
+                                )}
+                              </button>
                             </div>
-                          </button>
-
-                          <button className="flex items-center justify-between p-6 bg-brand-dark rounded-3xl border border-white/5 hover:border-white/20 group transition-all">
-                            <div className="flex items-center gap-4">
-                              <div className="w-12 h-12 bg-brand-black rounded-xl flex items-center justify-center overflow-hidden border border-white/10">
-                                <CreditCard className="w-6 h-6" />
-                              </div>
-                              <div className="text-left">
-                                <span className="block font-bold">Credit Card</span>
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">**** 1234</span>
-                              </div>
-                            </div>
-                          </button>
-                        </div>
-                        
-                        <div className="p-4 bg-brand-red/5 border border-brand-red/20 rounded-2xl flex items-start gap-4">
-                          <CheckCircle className="w-5 h-5 text-brand-red shrink-0" />
-                          <p className="text-xs text-white/60 leading-relaxed font-modern">
-                            Guest checkout enabled. No account necessary for this royalty treatment. Your data is secure and encrypted.
-                          </p>
-                        </div>
+                          </div>
+                        ) : (
+                          <div className="bg-brand-dark p-12 rounded-3xl border border-white/5 flex items-center justify-center">
+                            <div className="w-12 h-12 border-4 border-brand-yellow/20 border-t-brand-yellow rounded-full animate-spin" />
+                          </div>
+                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -2213,37 +2545,37 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.9, y: 50 }}
                 className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-lg bg-white text-brand-black rounded-[2.5rem] z-[201] overflow-hidden shadow-2xl flex flex-col"
               >
-                <div className="p-8 sm:p-12 overflow-y-auto max-h-[80vh] scrollbar-none">
+                <div id="digital-receipt" className="p-8 sm:p-12 overflow-y-auto max-h-[80vh] scrollbar-none bg-white" style={{ backgroundColor: '#ffffff', color: '#050505' }}>
                   {/* Receipt Header */}
-                  <div className="text-center mb-10 pb-10 border-b-2 border-dashed border-gray-200">
-                    <div className="w-20 h-20 bg-brand-black rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-xl">
-                       <ChefHat className="w-10 h-10 text-brand-yellow" />
+                  <div className="text-center mb-10 pb-10 border-b-2 border-dashed" style={{ borderColor: '#e5e7eb' }}>
+                    <div className="w-20 h-20 bg-brand-black rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-xl" style={{ backgroundColor: '#050505' }}>
+                       <ChefHat className="w-10 h-10" style={{ color: '#FFB800' }} />
                     </div>
                     <h2 className="text-3xl font-display uppercase tracking-tight mb-2">KING BURGERS</h2>
-                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-400">{t('receiptSubtitle') || 'Official Royal Banquet Receipt'}</p>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: '#9ca3af' }}>{t('receiptSubtitle') || 'Official Royal Banquet Receipt'}</p>
                   </div>
 
                   {/* Order Details */}
                   <div className="space-y-8 mb-10">
                     <div className="flex justify-between items-end">
                       <div>
-                        <span className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">{t('receiptId') || 'Receipt ID'}</span>
+                        <span className="block text-[10px] font-black uppercase tracking-widest mb-1" style={{ color: '#9ca3af' }}>{t('receiptId') || 'Receipt ID'}</span>
                         <span className="text-xl font-display">#{lastOrderNumber || 'BK-9283'}</span>
                       </div>
                       <div className="text-right">
-                        <span className="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">{t('dateTime') || 'Date & Time'}</span>
+                        <span className="block text-[10px] font-black uppercase tracking-widest mb-1" style={{ color: '#9ca3af' }}>{t('dateTime') || 'Date & Time'}</span>
                         <span className="text-sm font-bold font-modern">{new Date().toLocaleString()}</span>
                       </div>
                     </div>
 
                     <div className="space-y-4">
-                      <span className="block text-[10px] font-black uppercase tracking-widest text-gray-400">{t('orderSummary') || 'Order Summary'}</span>
+                      <span className="block text-[10px] font-black uppercase tracking-widest" style={{ color: '#9ca3af' }}>{t('orderSummary') || 'Order Summary'}</span>
                       {cart.map(item => (
                         <div key={item.cartId} className="flex justify-between items-start py-2">
                           <div className="flex flex-col">
                              <span className="text-sm font-bold uppercase tracking-tight">{item.quantity}x {getTranslatedItemName(item)}</span>
                              {item.customizations?.added.length ? (
-                               <span className="text-[10px] text-brand-red font-bold uppercase italic mt-1 leading-none">
+                               <span className="text-[10px] font-bold uppercase italic mt-1 leading-none" style={{ color: '#D71921' }}>
                                  +{item.customizations.added.join(', ')}
                                </span>
                              ) : null}
@@ -2253,16 +2585,16 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div className="border-t border-gray-100 pt-6 space-y-3">
-                      <div className="flex justify-between text-xs font-bold text-gray-400 uppercase tracking-widest">
+                    <div className="pt-6 space-y-3" style={{ borderTop: '1px solid #f3f4f6' }}>
+                      <div className="flex justify-between text-xs font-bold uppercase tracking-widest" style={{ color: '#9ca3af' }}>
                         <span>{t('subtotal')}</span>
                         <span>${subtotal.toFixed(2)}</span>
                       </div>
-                      <div className="flex justify-between text-xs font-bold text-gray-400 uppercase tracking-widest">
+                      <div className="flex justify-between text-xs font-bold uppercase tracking-widest" style={{ color: '#9ca3af' }}>
                         <span>{t('deliveryFee')}</span>
                         <span>$2.99</span>
                       </div>
-                      <div className="flex justify-between text-3xl font-display text-brand-black pt-4 border-t border-gray-100 mt-4">
+                      <div className="flex justify-between text-3xl font-display pt-4 mt-4" style={{ borderTop: '1px solid #f3f4f6', color: '#050505' }}>
                         <span>{t('total').toUpperCase()}</span>
                         <span>${(subtotal + 2.99).toFixed(2)}</span>
                       </div>
@@ -2270,10 +2602,10 @@ export default function App() {
                   </div>
 
                   {/* Footer Branding */}
-                  <div className="bg-gray-50 rounded-3xl p-6 text-center">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em] leading-relaxed">
+                  <div className="rounded-3xl p-6 text-center" style={{ backgroundColor: '#f9fafb' }}>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] leading-relaxed" style={{ color: '#9ca3af' }}>
                       Thank you for choosing the King's table.<br />
-                      Show this receipt to claim your <span className="text-brand-black">100 Loyalty Points</span>.
+                      Show this receipt to claim your <span style={{ color: '#050505' }}>100 Loyalty Points</span>.
                     </p>
                   </div>
                 </div>
@@ -2281,9 +2613,7 @@ export default function App() {
                 {/* Modal Actions */}
                 <div className="p-6 bg-brand-black flex gap-4">
                    <button 
-                    onClick={() => {
-                        toast.success("Receipt downloaded!", { description: "You can find it in your downloads folder." });
-                    }}
+                    onClick={handleDownloadReceipt}
                     className="flex-grow bg-white text-brand-black py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-3 hover:bg-gray-200 transition-all"
                    >
                      <Download className="w-4 h-4" /> Download PDF

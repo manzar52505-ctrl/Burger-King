@@ -28,6 +28,17 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["orderId", "userId", "items", "total", "status"]
+    },
+    "Admin": {
+      "title": "Administrator",
+      "description": "Users with administrative privileges",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "superadmin"] },
+        "addedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
     }
   },
   "firestore": {
@@ -38,6 +49,10 @@
     "/orders/{orderId}": {
       "schema": "Order",
       "description": "Customer orders"
+    },
+    "/admins/{userId}": {
+      "schema": "Admin",
+      "description": "System administrators"
     }
   }
 }
